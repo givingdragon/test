@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>최종 GPS 도보 테스터 (v3)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; touch-action: manipulation; }
+        .btn:active { transform: scale(0.97); }
+        .map-canvas { background-color: #1a202c; }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex flex-col items-center h-screen p-2 sm:p-4">
+
+    <div class="w-full max-w-lg mx-auto flex flex-col h-full">
+        <header class="text-center py-2">
+            <h1 class="text-2xl font-bold text-cyan-400">GPS 도보 테스터</h1>
+            <p id="app-status" class="text-gray-400 text-sm">GPS 신호를 기다리는 중...</p>
+        </header>
+
+        <!-- Map Visualization -->
+        <div class="relative w-full flex-grow rounded-xl overflow-hidden border-2 border-cyan-500/30 my-2">
+            <canvas id="mapCanvas" class="map-canvas"></canvas>
+            <div class="absolute bottom-2 left-2 bg-black/50 p-2 rounded-lg text-xs leading-tight">
+                <p><span class="text-green-400">🟢</span> 현재 위치</p>
+                <p><span class="text-blue-400">🔵</span> 웨이포인트</p>
+                <p><span class="text-yellow-400">★</span> 최고 신호 지점</p>
+            </div>
+            <div class="absolute top-2 right-2 bg-black/50 p-2 rounded-full text-xs text-center font-sans">
+                <div class="font-bold">N</div>
+                <div>⬆</div>
+            </div>
+        </div>
+
+        <!-- Live Status & Controls -->
+        <div class="bg-gray-800 rounded-xl p-4 shadow-lg">
+            <div id="status-grid" class="grid grid-cols-2 gap-3 text-sm mb-4">
+                <div><span class="text-gray-400">상대 위치:</span> <span id="current-meter-display" class="font-mono text-white">-</span></div>
+                <div><span class="text-gray-400">목표까지:</span> <span id="distance-display" class="font-mono font-bold text-green-400">-</span></div>
+                <div><span class="text-gray-400">알고리즘:</span> <span id="state-display" class="font-mono text-yellow-300">-</span></div>
+                <div><span class="text-gray-400">Stuck:</span> <span id="stuck-display" class="font-mono text-red-400">-</span></div>
+            </div>
+            
+            <div id="control-section" class="hidden">
+                <label for="rssi-input" class="block mb-2 text-base font-medium text-green-300">목표 도착! RSSI 값을 입력하세요:</label>
+                <input type="number" id="rssi-input" class="bg-gray-700 border border-gray-600 text-white text-2xl font-bold rounded-lg focus:ring-cyan-500 focus:border-cyan-500 block w-full p-3 text-center mb-3" placeholder="-30">
+                <button id="submit-rssi-button" class="btn w-full text-white bg-green-500 hover:bg-green-600 font-bold rounded-lg text-lg px-5 py-3 transition-transform">
+                    다음 목표 계산
+                </button>
+            </div>
+             <button id="start-button" class="btn w-full bg-blue-600 hover:bg-blue-700 font-bold py-3 px-6 rounded-lg text-lg">테스트 시작</button>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('mapCanvas');
+            const ctx = canvas.getContext('2d');
+            const startButton = document.getElementById('start-button');
+            const appStatus = document.getElementById('app-status');
+            const stateDisplay = document.getElementById('state-display');
+            const stuckDisplay = document.getElementById('stuck-display');
+            const currentMeterDisplay = document.getElementById('current-meter-display');
+            const distanceDisplay = document.getElementById('distance-display');
+            const controlSection = document.getElementById('control-section');
+            const rssiInput = document.getElementById('rssi-input');
+            const submitRssiButton = document.getElementById('submit-rssi-button');
+
+            let originLat, originLon, algo;
+            let isWaitingForRssi = false;
+            const EARTH_RADIUS = 6378137.0;
+            let camera = { x: 0, y: 0, zoom: 25 }; // 1미터당 25픽셀로 확대
+            
+            const PARAMS = {
+                ARRIVAL_DISTANCE: 2.0, 
+                ASCENT_THRESHOLD: -85.0, 
+                TARGET_THRESHOLD: -20.0, // 목표 완료 신호 강도 -20dBm으로 수정
+                SIGNAL_ULTRA_PINPOINT: -55.0, DIST_ULTRA_PINPOINT: 0.3,
+                SIGNAL_PINPOINT: -65.0, DIST_PINPOINT: 1.0,
+                SIGNAL_NEAR: -75.0, DIST_NEAR: 3.0,
+                DIST_FAR: 10.0, 
+                STUCK_THRESHOLD: 5, 
+                ESCAPE_DISTANCE: 10.0,
+            };
+
+            const vec = { create: (x, y) => ({ x, y }), add: (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y }), mul: (v, s) => ({ x: v.x * s, y: v.y * s }), rotate: (v, angleRad) => ({ x: v.x * Math.cos(angleRad) - v.y * Math.sin(angleRad), y: v.x * Math.sin(angleRad) + v.y * Math.cos(angleRad) }) };
+            
+            function latlonToMeters(lat, lon) {
+                if (!originLat) return vec.create(0, 0);
+                const dx = (lon - originLon) * (EARTH_RADIUS * Math.cos(originLat * Math.PI / 180)) * (Math.PI / 180);
+                const dy = (lat - originLat) * EARTH_RADIUS * (Math.PI / 180);
+                return vec.create(dx, dy);
+            }
+
+            class HomingAlgorithm {
+                constructor(startPos, params) { Object.assign(this, { pos: startPos, waypoint: startPos, path: [startPos], params, isFinished: false, state: "IDLE", lastSignal: -100.0, stuck_counter: 0, best_known_pos: startPos, best_known_signal: -100.0, ascentDirection: vec.create(1, 0) }); }
+                decideAction(rssi) {
+                    if (this.isFinished) return;
+                    if (rssi > this.best_known_signal) { this.best_known_signal = rssi; this.best_known_pos = this.pos; }
+                    if (rssi >= this.params.TARGET_THRESHOLD) { this.state = "FINISHED"; this.isFinished = true; return; }
+                    if (this.state === "IDLE") this._executeIdle(rssi); else if (this.state === "ADAPTIVE_ASCENT") this._executeAdaptiveAscent(rssi); else if (this.state === "ESCAPING") this._executeEscaping();
+                    this.lastSignal = rssi;
+                }
+                _getAdaptiveDistance(signal) {
+                    if (signal > this.params.SIGNAL_ULTRA_PINPOINT) return this.params.DIST_ULTRA_PINPOINT;
+                    if (signal > this.params.SIGNAL_PINPOINT) return this.params.DIST_PINPOINT;
+                    if (signal > this.params.SIGNAL_NEAR) return this.params.DIST_NEAR; return this.params.DIST_FAR;
+                }
+                _executeIdle(rssi) {
+                    if (rssi > this.params.ASCENT_THRESHOLD) { this.state = "ADAPTIVE_ASCENT"; const angle = Math.random() * Math.PI * 2; this.ascentDirection = vec.create(Math.cos(angle), Math.sin(angle)); this._executeAdaptiveAscent(rssi); } else { this.waypoint = this.pos; }
+                }
+                _executeAdaptiveAscent(rssi) {
+                    if (rssi > this.lastSignal) { this.stuck_counter = 0; const stepDistance = this._getAdaptiveDistance(rssi); this.waypoint = vec.add(this.pos, vec.mul(this.ascentDirection, stepDistance)); } 
+                    else { this.stuck_counter++; if (this.stuck_counter > this.params.STUCK_THRESHOLD) { this.state = "ESCAPING"; this.waypoint = this.best_known_pos; return; } this.waypoint = this.pos; this.ascentDirection = vec.rotate(this.ascentDirection, Math.PI / 4); }
+                }
+                _executeEscaping() { const angle = Math.random() * Math.PI * 2; this.ascentDirection = vec.create(Math.cos(angle), Math.sin(angle)); this.waypoint = vec.add(this.best_known_pos, vec.mul(this.ascentDirection, this.params.ESCAPE_DISTANCE)); this.state = "ADAPTIVE_ASCENT"; this.stuck_counter = 0; }
+                updatePosition(newPos) { if(Math.hypot(this.pos.x - newPos.x, this.pos.y - newPos.y) > 0.1) { this.pos = newPos; this.path.push(newPos); } }
+            }
+
+            function draw() {
+                if (!algo) return;
+                const w = canvas.width, h = canvas.height;
+                ctx.clearRect(0, 0, w, h);
+                camera.x += (algo.pos.x - camera.x) * 0.1;
+                camera.y += (algo.pos.y - camera.y) * 0.1;
+
+                ctx.save();
+                ctx.translate(w / 2, h / 2);
+                ctx.scale(camera.zoom, camera.zoom);
+                ctx.translate(-camera.x, -camera.y);
+
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
+                ctx.lineWidth = 1 / camera.zoom;
+                const gridSize = 10;
+                const viewBounds = { left: camera.x - (w / 2 / camera.zoom), right: camera.x + (w / 2 / camera.zoom), top: camera.y - (h / 2 / camera.zoom), bottom: camera.y + (h / 2 / camera.zoom) };
+                for (let x = Math.floor(viewBounds.left / gridSize) * gridSize; x < viewBounds.right; x += gridSize) { ctx.beginPath(); ctx.moveTo(x, viewBounds.top); ctx.lineTo(x, viewBounds.bottom); ctx.stroke(); }
+                for (let y = Math.floor(viewBounds.top / gridSize) * gridSize; y < viewBounds.bottom; y += gridSize) { ctx.beginPath(); ctx.moveTo(viewBounds.left, y); ctx.lineTo(viewBounds.right, y); ctx.stroke(); }
+
+                if (algo.path.length > 1) {
+                    ctx.strokeStyle = "#4A5568"; ctx.lineWidth = 2 / camera.zoom; ctx.beginPath();
+                    ctx.moveTo(algo.path[0].x, algo.path[0].y);
+                    for (let i = 1; i < algo.path.length; i++) { ctx.lineTo(algo.path[i].x, algo.path[i].y); }
+                    ctx.stroke();
+                }
+                
+                ctx.font = `${12 / camera.zoom}px Arial`; ctx.fillStyle = "#FBBF24"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+                ctx.fillText("★", algo.best_known_pos.x, algo.best_known_pos.y);
+                ctx.fillStyle = "#4299E1"; ctx.beginPath(); ctx.arc(algo.waypoint.x, algo.waypoint.y, 0.5, 0, Math.PI * 2); ctx.fill();
+                ctx.fillStyle = "#48BB78"; ctx.beginPath(); ctx.arc(algo.pos.x, algo.pos.y, 0.5, 0, Math.PI * 2); ctx.fill();
+
+                ctx.restore();
+                requestAnimationFrame(draw);
+            }
+
+            function handleGpsSuccess(position) {
+                const { latitude, longitude } = position.coords;
+                if (!originLat) {
+                    originLat = latitude; originLon = longitude;
+                    appStatus.textContent = "원점 설정 완료. 테스트를 시작하세요.";
+                    startButton.style.display = 'block';
+                    return;
+                }
+                if (algo) {
+                    const currentPosMeters = latlonToMeters(latitude, longitude);
+                    algo.updatePosition(currentPosMeters);
+                    
+                    stateDisplay.textContent = algo.state;
+                    stuckDisplay.textContent = algo.stuck_counter;
+                    currentMeterDisplay.textContent = `(${currentPosMeters.x.toFixed(1)}, ${currentPosMeters.y.toFixed(1)})m`;
+                    const dist = Math.hypot(algo.waypoint.x - currentPosMeters.x, algo.waypoint.y - currentPosMeters.y);
+                    distanceDisplay.textContent = `${dist.toFixed(1)} m`;
+
+                    if (dist < PARAMS.ARRIVAL_DISTANCE && !isWaitingForRssi) {
+                        isWaitingForRssi = true;
+                        controlSection.style.display = 'block';
+                        appStatus.textContent = "목표 도착! RSSI를 입력하세요.";
+                        rssiInput.focus();
+                    }
+                }
+            }
+            
+            startButton.addEventListener('click', () => {
+                if (!originLat) { alert("아직 GPS 원점이 설정되지 않았습니다. 잠시만 기다려주세요."); return; }
+                algo = new HomingAlgorithm(vec.create(0, 0), PARAMS);
+                isWaitingForRssi = true;
+                startButton.style.display = 'none';
+                controlSection.style.display = 'block';
+                appStatus.textContent = "시작점 RSSI를 입력하세요.";
+                requestAnimationFrame(draw);
+            });
+
+            submitRssiButton.addEventListener('click', () => {
+                const rssiValue = parseFloat(rssiInput.value);
+                if (isNaN(rssiValue)) { alert("유효한 RSSI 값을 입력하세요."); return; }
+                algo.decideAction(rssiValue);
+                rssiInput.value = '';
+                if (algo.isFinished) {
+                    appStatus.textContent = "목표 지점 도착! 테스트 종료.";
+                    controlSection.style.display = 'none';
+                } else {
+                    isWaitingForRssi = false;
+                    controlSection.style.display = 'none';
+                    appStatus.textContent = "다음 목표 계산 완료. 이동하세요.";
+                }
+            });
+            
+            function setupCanvas() {
+                const container = canvas.parentElement;
+                canvas.width = container.clientWidth;
+                canvas.height = container.clientHeight;
+            }
+
+            window.addEventListener('resize', setupCanvas);
+            setupCanvas();
+
+            if (navigator.geolocation) {
+                navigator.geolocation.watchPosition(handleGpsSuccess, (err) => appStatus.textContent = `GPS 오류: ${err.message}`, { enableHighAccuracy: true, maximumAge: 0 });
+                startButton.style.display = 'none';
+            } else {
+                appStatus.textContent = "이 브라우저에서는 GPS를 지원하지 않습니다.";
+            }
+        });
+    </script>
+</body>
+</html>
