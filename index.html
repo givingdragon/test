@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>GPS 도보 테스터 (실측 파라미터)</title>
+    <title>GPS 도보 테스터 (안정화 버전)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { font-family: 'Inter', sans-serif; touch-action: manipulation; }
@@ -22,7 +22,7 @@
         <div class="relative w-full flex-grow rounded-xl overflow-hidden border-2 border-cyan-500/30 my-2">
             <canvas id="mapCanvas" class="map-canvas"></canvas>
             <div class="absolute bottom-2 left-2 bg-black/50 p-2 rounded-lg text-xs leading-tight">
-                <p><span class="text-green-400">🟢</span> 현재 위치</p>
+                <p><span class="text-green-400">🟢</span> 현재 위치 (스무딩)</p>
                 <p><span class="text-blue-400">🔵</span> 웨이포인트</p>
                 <p><span class="text-yellow-400">★</span> 최고 신호 지점</p>
             </div>
@@ -44,7 +44,7 @@
             
             <div id="control-section" class="hidden">
                 <label for="rssi-input" class="block mb-2 text-base font-medium text-green-300">목표 도착! RSSI 값을 입력하세요:</label>
-                <input type="number" id="rssi-input" class="bg-gray-700 border border-gray-600 text-white text-2xl font-bold rounded-lg focus:ring-cyan-500 focus:border-cyan-500 block w-full p-3 text-center mb-3" placeholder="-30">
+                <input type="number" id="rssi-input" class="bg-gray-700 border border-gray-600 text-white text-2xl font-bold rounded-lg focus:ring-cyan-500 focus:border-cyan-500 block w-full p-3 text-center mb-3" placeholder="-55">
                 <button id="submit-rssi-button" class="btn w-full text-white bg-green-500 hover:bg-green-600 font-bold rounded-lg text-lg px-5 py-3 transition-transform">
                     다음 목표 계산
                 </button>
@@ -74,23 +74,28 @@
             const EARTH_RADIUS = 6378137.0;
             let camera = { x: 0, y: 0, zoom: 25 };
             
-            let gpsReadings = [];
-            let updateInterval;
+            // --- 데이터 안정화를 위한 버퍼 ---
+            const gpsBuffer = [];
 
             // --- 현실 데이터 기반 파라미터 수정 ---
             const PARAMS = {
-                ARRIVAL_DISTANCE: 2.0, 
-                ASCENT_THRESHOLD: -85.0,     // 이 신호 강도부터 탐색 시작
-                TARGET_THRESHOLD: -30.0,     // 이 신호 강도에 도달하면 완료
+                ARRIVAL_DISTANCE: 1.5,      // 도착 인정 거리 (조금 줄임)
+                ASCENT_THRESHOLD: -80.0,    // 이 신호 강도부터 탐색 시작 (현실 반영)
+                TARGET_THRESHOLD: -35.0,    // 목표 신호 강도 (현실 반영)
                 
                 // 신호 강도별 이동 거리 재설정
-                SIGNAL_PINPOINT: -45.0,    DIST_PINPOINT: 0.5,    // 50cm
-                SIGNAL_NEAR: -65.0,        DIST_NEAR: 2.0,      // 2m
-                SIGNAL_MID: -80.0,         DIST_MID: 5.0,       // 5m
-                DIST_FAR: 15.0,      // 15m (신호가 -80dBm 보다 약할 때)
+                SIGNAL_PINPOINT: -45.0,   DIST_PINPOINT: 0.7,   // 70cm
+                SIGNAL_NEAR: -65.0,       DIST_NEAR: 2.0,     // 2m
+                SIGNAL_MID: -75.0,        DIST_MID: 4.0,      // 4m
+                DIST_FAR: 8.0,            // 8m (신호가 -75dBm 보다 약할 때)
 
-                STUCK_THRESHOLD: 5, 
-                ESCAPE_DISTANCE: 10.0,
+                STUCK_THRESHOLD: 4,       // 같은 장소에서 4번 신호 악화 시 stuck
+                ESCAPE_DISTANCE: 7.0,
+
+                // --- 데이터 스무딩(안정화) 파라미터 추가 ---
+                GPS_BUFFER_SIZE: 10,        // 최근 10개의 GPS 좌표를 평균
+                RSSI_BUFFER_SIZE: 3,        // 최근 3개의 RSSI 값을 평균
+                RSSI_IMPROVEMENT_THRESHOLD: 1.0, // 신호가 1dBm 이상 '뚜렷하게' 좋아졌을 때만 인정
             };
 
             const vec = { create: (x, y) => ({ x, y }), add: (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y }), mul: (v, s) => ({ x: v.x * s, y: v.y * s }), rotate: (v, angleRad) => ({ x: v.x * Math.cos(angleRad) - v.y * Math.sin(angleRad), y: v.x * Math.sin(angleRad) + v.y * Math.cos(angleRad) }) };
@@ -103,14 +108,51 @@
             }
 
             class HomingAlgorithm {
-                constructor(startPos, params) { Object.assign(this, { pos: startPos, waypoint: startPos, path: [startPos], params, isFinished: false, state: "IDLE", lastSignal: -100.0, stuck_counter: 0, best_known_pos: startPos, best_known_signal: -100.0, ascentDirection: vec.create(1, 0) }); }
+                constructor(startPos, params) { 
+                    Object.assign(this, { 
+                        pos: startPos, 
+                        waypoint: startPos, 
+                        path: [startPos], 
+                        params, 
+                        isFinished: false, 
+                        state: "IDLE", 
+                        lastSmoothedSignal: -100.0, // --- 스무딩된 값 저장 ---
+                        stuck_counter: 0, 
+                        best_known_pos: startPos, 
+                        best_known_signal: -100.0, 
+                        ascentDirection: vec.create(1, 0),
+                        rssiBuffer: [], // --- RSSI 버퍼 추가 ---
+                    }); 
+                }
+
                 decideAction(rssi) {
                     if (this.isFinished) return;
-                    if (rssi > this.best_known_signal) { this.best_known_signal = rssi; this.best_known_pos = this.pos; }
-                    if (rssi >= this.params.TARGET_THRESHOLD) { this.state = "FINISHED"; this.isFinished = true; return; }
-                    if (this.state === "IDLE") this._executeIdle(rssi); else if (this.state === "ADAPTIVE_ASCENT") this._executeAdaptiveAscent(rssi); else if (this.state === "ESCAPING") this._executeEscaping();
-                    this.lastSignal = rssi;
+
+                    // --- RSSI 이동 평균 필터링 ---
+                    this.rssiBuffer.push(rssi);
+                    if (this.rssiBuffer.length > this.params.RSSI_BUFFER_SIZE) {
+                        this.rssiBuffer.shift();
+                    }
+                    const smoothedRssi = this.rssiBuffer.reduce((a, b) => a + b, 0) / this.rssiBuffer.length;
+                    // ---
+
+                    if (smoothedRssi > this.best_known_signal) { 
+                        this.best_known_signal = smoothedRssi; 
+                        this.best_known_pos = this.pos; 
+                    }
+                    if (smoothedRssi >= this.params.TARGET_THRESHOLD) { 
+                        this.state = "FINISHED"; 
+                        this.isFinished = true; 
+                        return; 
+                    }
+
+                    if (this.state === "IDLE") this._executeIdle(smoothedRssi); 
+                    else if (this.state === "ADAPTIVE_ASCENT") this._executeAdaptiveAscent(smoothedRssi); 
+                    else if (this.state === "ESCAPING") this._executeEscaping(smoothedRssi);
+                    
+                    this.lastSmoothedSignal = smoothedRssi;
                 }
+
                 getTotalDistance() {
                     let total = 0;
                     for (let i = 1; i < this.path.length; i++) {
@@ -118,21 +160,56 @@
                     }
                     return total;
                 }
+
                 _getAdaptiveDistance(signal) {
                     if (signal > this.params.SIGNAL_PINPOINT) return this.params.DIST_PINPOINT;
                     if (signal > this.params.SIGNAL_NEAR) return this.params.DIST_NEAR;
                     if (signal > this.params.SIGNAL_MID) return this.params.DIST_MID;
                     return this.params.DIST_FAR;
                 }
+
                 _executeIdle(rssi) {
-                    if (rssi > this.params.ASCENT_THRESHOLD) { this.state = "ADAPTIVE_ASCENT"; const angle = Math.random() * Math.PI * 2; this.ascentDirection = vec.create(Math.cos(angle), Math.sin(angle)); this._executeAdaptiveAscent(rssi); } else { this.waypoint = this.pos; }
+                    if (rssi > this.params.ASCENT_THRESHOLD) { 
+                        this.state = "ADAPTIVE_ASCENT"; 
+                        const angle = Math.random() * Math.PI * 2; 
+                        this.ascentDirection = vec.create(Math.cos(angle), Math.sin(angle)); 
+                        this._executeAdaptiveAscent(rssi); 
+                    } else { 
+                        this.waypoint = this.pos; 
+                    }
                 }
+
                 _executeAdaptiveAscent(rssi) {
-                    if (rssi > this.lastSignal) { this.stuck_counter = 0; const stepDistance = this._getAdaptiveDistance(rssi); this.waypoint = vec.add(this.pos, vec.mul(this.ascentDirection, stepDistance)); } 
-                    else { this.stuck_counter++; if (this.stuck_counter > this.params.STUCK_THRESHOLD) { this.state = "ESCAPING"; this.waypoint = this.best_known_pos; return; } this.waypoint = this.pos; this.ascentDirection = vec.rotate(this.ascentDirection, Math.PI / 4); }
+                    // --- 판단 로직 수정: '뚜렷한' 신호 개선이 있을 때만 전진 ---
+                    if (rssi > this.lastSmoothedSignal + this.params.RSSI_IMPROVEMENT_THRESHOLD) {
+                        this.stuck_counter = 0; 
+                        const stepDistance = this._getAdaptiveDistance(rssi); 
+                        this.waypoint = vec.add(this.pos, vec.mul(this.ascentDirection, stepDistance)); 
+                    } else { 
+                        this.stuck_counter++; 
+                        if (this.stuck_counter > this.params.STUCK_THRESHOLD) { 
+                            this.state = "ESCAPING"; 
+                            this.waypoint = this.best_known_pos; // 일단 최고 지점으로 후퇴
+                            return; 
+                        } 
+                        // 성급히 방향을 틀지 않고, 현재 위치에서 대기하며 다른 방향을 모색
+                        this.waypoint = this.pos; 
+                        this.ascentDirection = vec.rotate(this.ascentDirection, Math.PI / 2.5); // 90도에 가깝게 더 넓게 회전
+                    }
                 }
-                _executeEscaping() { const angle = Math.random() * Math.PI * 2; this.ascentDirection = vec.create(Math.cos(angle), Math.sin(angle)); this.waypoint = vec.add(this.best_known_pos, vec.mul(this.ascentDirection, this.params.ESCAPE_DISTANCE)); this.state = "ADAPTIVE_ASCENT"; this.stuck_counter = 0; }
+                
+                _executeEscaping(rssi) { 
+                    const angle = Math.random() * Math.PI * 2; 
+                    this.ascentDirection = vec.create(Math.cos(angle), Math.sin(angle)); 
+                    this.waypoint = vec.add(this.best_known_pos, vec.mul(this.ascentDirection, this.params.ESCAPE_DISTANCE)); 
+                    this.state = "ADAPTIVE_ASCENT"; 
+                    this.stuck_counter = 0; 
+                }
+
                 updatePosition(newPos) {
+                    if (!this.path.length) {
+                         this.path.push(newPos);
+                    }
                     const lastPathPoint = this.path[this.path.length - 1];
                     if (Math.hypot(lastPathPoint.x - newPos.x, lastPathPoint.y - newPos.y) < 0.1) return;
                     this.pos = newPos;
@@ -176,35 +253,31 @@
                 requestAnimationFrame(draw);
             }
 
+            // --- 실시간 GPS 처리 및 앱 업데이트 로직 통합 ---
             function handleGpsSuccess(position) {
-                gpsReadings.push({
-                    lat: position.coords.latitude,
-                    lon: position.coords.longitude
-                });
-
                 if (!originLat) {
                     originLat = position.coords.latitude;
                     originLon = position.coords.longitude;
                     appStatus.textContent = "원점 설정 완료. 테스트를 시작하세요.";
                     startButton.style.display = 'block';
+                    return;
                 }
-            }
 
-            function processGpsAndUpdate() {
-                if (!algo || gpsReadings.length === 0) return;
-
-                let sumLat = 0, sumLon = 0;
-                for (const reading of gpsReadings) {
-                    sumLat += reading.lat;
-                    sumLon += reading.lon;
+                // GPS 이동 평균 필터링
+                gpsBuffer.push({ lat: position.coords.latitude, lon: position.coords.longitude });
+                if (gpsBuffer.length > PARAMS.GPS_BUFFER_SIZE) {
+                    gpsBuffer.shift();
                 }
-                const avgLat = sumLat / gpsReadings.length;
-                const avgLon = sumLon / gpsReadings.length;
-                gpsReadings = [];
+                const avgPos = gpsBuffer.reduce((acc, pos) => ({ lat: acc.lat + pos.lat, lon: acc.lon + pos.lon }), { lat: 0, lon: 0 });
+                const avgLat = avgPos.lat / gpsBuffer.length;
+                const avgLon = avgPos.lon / gpsBuffer.length;
+
+                if (!algo) return;
 
                 const currentPosMeters = latlonToMeters(avgLat, avgLon);
                 algo.updatePosition(currentPosMeters);
                 
+                // UI 업데이트
                 stateDisplay.textContent = algo.state;
                 stuckDisplay.textContent = algo.stuck_counter;
                 currentMeterDisplay.textContent = `(${currentPosMeters.x.toFixed(1)}, ${currentPosMeters.y.toFixed(1)})m`;
@@ -220,7 +293,7 @@
                     rssiInput.focus();
                 }
             }
-            
+
             startButton.addEventListener('click', () => {
                 if (!originLat) { alert("아직 GPS 원점이 설정되지 않았습니다. 잠시만 기다려주세요."); return; }
                 algo = new HomingAlgorithm(vec.create(0, 0), PARAMS);
@@ -229,9 +302,7 @@
                 controlSection.style.display = 'block';
                 appStatus.textContent = "시작점 RSSI를 입력하세요.";
                 
-                if (updateInterval) clearInterval(updateInterval);
-                updateInterval = setInterval(processGpsAndUpdate, 5000);
-
+                // setInterval을 제거하고, draw 루프 시작
                 requestAnimationFrame(draw);
             });
 
@@ -243,7 +314,7 @@
                 if (algo.isFinished) {
                     appStatus.textContent = "목표 지점 도착! 테스트 종료.";
                     controlSection.style.display = 'none';
-                    if (updateInterval) clearInterval(updateInterval);
+                    // watchPosition은 계속 켜두어 최종 위치를 볼 수 있게 함
                 } else {
                     isWaitingForRssi = false;
                     controlSection.style.display = 'none';
@@ -261,7 +332,7 @@
             setupCanvas();
 
             if (navigator.geolocation) {
-                navigator.geolocation.watchPosition(handleGpsSuccess, (err) => appStatus.textContent = `GPS 오류: ${err.message}`, { enableHighAccuracy: true, maximumAge: 0 });
+                navigator.geolocation.watchPosition(handleGpsSuccess, (err) => appStatus.textContent = `GPS 오류: ${err.message}`, { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 });
                 startButton.style.display = 'none';
             } else {
                 appStatus.textContent = "이 브라우저에서는 GPS를 지원하지 않습니다.";
@@ -270,6 +341,7 @@
     </script>
 </body>
 </html>
+
 
 
 
