@@ -3,19 +3,55 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>GPS 도보 테스터 (로깅 기능 탑재 + 칼만 필터)</title>
+    <title>GPS 도보 테스터 (정상작동 + 초기값 + 방향표시)</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/kalmanjs@1.1.0/dist/kalman.min.js"></script>
     <style>
         body { font-family: 'Inter', sans-serif; touch-action: manipulation; }
         .btn:active { transform: scale(0.97); }
         .map-canvas { background-color: #1a202c; }
+        .compass { 
+            width: 60px; 
+            height: 60px; 
+            border: 2px solid #10B981; 
+            border-radius: 50%; 
+            position: relative; 
+            background: rgba(0,0,0,0.7);
+        }
+        .compass::before { 
+            content: '📱'; 
+            position: absolute; 
+            top: 50%; 
+            left: 50%; 
+            transform: translate(-50%, -50%); 
+            font-size: 16px;
+        }
+        .direction-arrow { 
+            position: absolute; 
+            top: 50%; 
+            left: 50%; 
+            width: 2px; 
+            height: 25px; 
+            background: #EF4444; 
+            transform-origin: bottom center; 
+            transform: translate(-50%, -100%);
+        }
+        .direction-arrow::before { 
+            content: '▲'; 
+            position: absolute; 
+            top: -8px; 
+            left: 50%; 
+            transform: translateX(-50%); 
+            color: #EF4444; 
+            font-size: 12px;
+        }
     </style>
 </head>
 <body class="bg-gray-900 text-white flex flex-col items-center h-screen p-2 sm:p-4">
 
     <div class="w-full max-w-lg mx-auto flex flex-col h-full">
         <header class="text-center py-2">
-            <h1 class="text-2xl font-bold text-cyan-400">GPS 도보 테스터 (로깅 기능 탑재 + 칼만 필터)</h1>
+            <h1 class="text-2xl font-bold text-cyan-400">GPS 도보 테스터 (정상작동 + 초기값 + 방향표시)</h1>
             <p id="app-status" class="text-gray-400 text-sm">GPS 신호를 기다리는 중...</p>
         </header>
 
@@ -30,17 +66,27 @@
                 <div class="font-bold">N</div>
                 <div>⬆</div>
             </div>
+            <!-- 방향 나침반 -->
+            <div class="absolute top-2 left-2 bg-black/50 p-2 rounded-lg">
+                <div class="compass" id="compass">
+                    <div class="direction-arrow" id="direction-arrow"></div>
+                </div>
+                <div class="text-xs text-center mt-1">
+                    <div>방향: <span id="bearing-display" class="text-cyan-400">0°</span></div>
+                    <div>폰: <span id="phone-heading" class="text-green-400">0°</span></div>
+                </div>
+            </div>
         </div>
 
         <div class="bg-gray-800 rounded-xl p-4 shadow-lg">
             <div id="status-grid" class="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm mb-4">
-                <div><span class="text-gray-400">상대 위치:</span> <span id="current-meter-display" class="font-mono text-white">-</span></div>
-                <div><span class="text-gray-400">목표까지:</span> <span id="distance-display" class="font-mono font-bold text-green-400">-</span></div>
-                <div><span class="text-gray-400">총 이동 거리:</span> <span id="total-distance-display" class="font-mono text-white">-</span></div>
-                <div><span class="text-gray-400">알고리즘:</span> <span id="state-display" class="font-mono text-yellow-300">-</span></div>
-                <div><span class="text-gray-400">Stuck:</span> <span id="stuck-display" class="font-mono text-red-400">-</span></div>
-                <div><span class="text-gray-400">최고 신호:</span> <span id="best-signal-display" class="font-mono text-yellow-400">-</span></div>
-                <div><span class="text-gray-400">추정 속도:</span> <span id="velocity-display" class="font-mono text-cyan-400">-</span></div>
+                <div><span class="text-gray-400">상대 위치:</span> <span id="current-meter-display" class="font-mono text-white">(0.0, 0.0)m</span></div>
+                <div><span class="text-gray-400">목표까지:</span> <span id="distance-display" class="font-mono font-bold text-green-400">0.0 m</span></div>
+                <div><span class="text-gray-400">총 이동 거리:</span> <span id="total-distance-display" class="font-mono text-white">0.0 m</span></div>
+                <div><span class="text-gray-400">알고리즘:</span> <span id="state-display" class="font-mono text-yellow-300">IDLE</span></div>
+                <div><span class="text-gray-400">Stuck:</span> <span id="stuck-display" class="font-mono text-red-400">0</span></div>
+                <div><span class="text-gray-400">최고 신호:</span> <span id="best-signal-display" class="font-mono text-yellow-400">-100.0 dBm</span></div>
+                <div><span class="text-gray-400">추정 속도:</span> <span id="velocity-display" class="font-mono text-cyan-400">0.00 m/s</span></div>
                 <div><span class="text-gray-400">필터 상태:</span> <span id="filter-status" class="font-mono text-purple-400">초기화 중</span></div>
             </div>
 
@@ -62,7 +108,7 @@
     </div>
 
     <script>
-        // 칼만 필터 클래스 구현
+        // 칼만 필터 클래스 구현 (정상 작동하는 파일에서 가져옴)
         class KalmanFilter {
             constructor() {
                 // 상태 벡터: [x, y, vx, vy] (위치와 속도)
@@ -273,12 +319,19 @@
             const logSection = document.getElementById('log-section');
             const downloadLogButton = document.getElementById('download-log-button');
             const logCount = document.getElementById('log-count');
+            const bearingDisplay = document.getElementById('bearing-display');
+            const phoneHeadingDisplay = document.getElementById('phone-heading');
+            const directionArrow = document.getElementById('direction-arrow');
             
             let logData = [];
             let originLat, originLon, algo;
             let isWaitingForRssi = false;
             const EARTH_RADIUS = 6378137.0;
             let camera = { x: 0, y: 0, zoom: 25 };
+            
+            // 방향 관련 변수
+            let phoneHeading = 0;  // 휴대폰 방향 (나침반)
+            let targetBearing = 0; // 목표 지점 방향
             
             // 칼만 필터 인스턴스 생성
             let kalmanFilter = new KalmanFilter();
@@ -313,6 +366,46 @@
                 const dx = (lon - originLon) * (EARTH_RADIUS * Math.cos(originLat * Math.PI / 180)) * (Math.PI / 180);
                 const dy = (lat - originLat) * EARTH_RADIUS * (Math.PI / 180);
                 return vec.create(dx, dy);
+            }
+
+            // 방향 계산 함수
+            function calculateBearing(from, to) {
+                const dx = to.x - from.x;
+                const dy = to.y - from.y;
+                const bearing = Math.atan2(dx, dy) * 180 / Math.PI;
+                return (bearing + 360) % 360;
+            }
+
+            // 방향 표시 업데이트
+            function updateDirection() {
+                if (!algo || !algo.pos || !algo.waypoint) return;
+                
+                // 목표 방향 계산
+                targetBearing = calculateBearing(algo.pos, algo.waypoint);
+                bearingDisplay.textContent = `${targetBearing.toFixed(0)}°`;
+                
+                // 상대적 방향 계산 (휴대폰 방향 대비)
+                const relativeBearing = (targetBearing - phoneHeading + 360) % 360;
+                
+                // 화살표 회전
+                directionArrow.style.transform = `translate(-50%, -100%) rotate(${relativeBearing}deg)`;
+            }
+
+            // 초기값 설정 함수
+            function setInitialValues() {
+                currentMeterDisplay.textContent = "(0.0, 0.0)m";
+                distanceDisplay.textContent = "0.0 m";
+                totalDistanceDisplay.textContent = "0.0 m";
+                stateDisplay.textContent = "IDLE";
+                stuckDisplay.textContent = "0";
+                bestSignalDisplay.textContent = "-100.0 dBm";
+                velocityDisplay.textContent = "0.00 m/s";
+                filterStatus.textContent = "초기화 중";
+                bearingDisplay.textContent = "0°";
+                phoneHeadingDisplay.textContent = "0°";
+                
+                // 화살표 북쪽 방향으로 초기화
+                directionArrow.style.transform = `translate(-50%, -100%) rotate(0deg)`;
             }
 
             class HomingAlgorithm {
@@ -409,6 +502,7 @@
                 requestAnimationFrame(draw);
             }
 
+            // 정상 작동하는 파일의 GPS 처리 함수를 그대로 사용
             function handleGpsSuccess(position) {
                 if (!originLat) {
                     originLat = position.coords.latitude; 
@@ -440,7 +534,7 @@
                 // 속도 표시 업데이트
                 velocityDisplay.textContent = `${estimatedVelocity.toFixed(2)} m/s`;
                 
-                // 정지 상태 체크 (칼만 필터 추정 속도 기반)
+                // 정지 상태 체크 (칼만 필터 추정 속도 기반) - 정상 작동 파일과 동일
                 if (estimatedVelocity < PARAMS.STATIONARY_SPEED_THRESHOLD) {
                     // 정지 상태일 때는 위치 업데이트하지 않음
                     return; 
@@ -455,6 +549,9 @@
                 totalDistanceDisplay.textContent = `${algo.getTotalDistance().toFixed(1)} m`;
                 bestSignalDisplay.textContent = `${algo.best_known_signal.toFixed(1)} dBm`;
                 
+                // 방향 업데이트 추가
+                updateDirection();
+                
                 if (dist < PARAMS.ARRIVAL_DISTANCE && !isWaitingForRssi) {
                     isWaitingForRssi = true; 
                     controlSection.style.display = 'block';
@@ -462,28 +559,72 @@
                     rssiInput.focus();
                 }
             }
+
+            // 휴대폰 방향 감지
+            function handleOrientationChange(event) {
+                if (event.alpha !== null) {
+                    phoneHeading = event.alpha;
+                    phoneHeadingDisplay.textContent = `${phoneHeading.toFixed(0)}°`;
+                    updateDirection();
+                }
+            }
+
+            // Device Orientation API 권한 요청
+            async function requestOrientationPermission() {
+                if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    try {
+                        const permission = await DeviceOrientationEvent.requestPermission();
+                        if (permission === 'granted') {
+                            window.addEventListener('deviceorientation', handleOrientationChange);
+                        } else {
+                            console.log('Device orientation permission denied');
+                        }
+                    } catch (error) {
+                        console.log('Device orientation not supported');
+                    }
+                } else {
+                    window.addEventListener('deviceorientation', handleOrientationChange);
+                }
+            }
             
             startButton.addEventListener('click', () => {
-                if (!originLat) { alert("아직 GPS 원점이 설정되지 않았습니다. 잠시만 기다려주세요."); return; }
+                if (!originLat) { 
+                    alert("아직 GPS 원점이 설정되지 않았습니다. 잠시만 기다려주세요."); 
+                    return; 
+                }
+                
+                // 알고리즘 초기화
                 algo = new HomingAlgorithm(vec.create(0, 0), PARAMS);
                 
                 // 칼만 필터 초기화
                 kalmanFilter.reset();
                 
+                // 로그 초기화
                 logData = []; 
                 logCount.textContent = '0';
                 logSection.style.display = 'block'; 
+                
+                // UI 상태 변경
                 isWaitingForRssi = true; 
                 startButton.style.display = 'none'; 
                 controlSection.style.display = 'block';
                 appStatus.textContent = "시작점 RSSI를 입력하세요.";
+                
+                // 방향 센서 권한 요청
+                requestOrientationPermission();
+                
+                // 렌더링 시작
                 requestAnimationFrame(draw);
             });
 
             submitRssiButton.addEventListener('click', () => {
                 const rssiValue = parseFloat(rssiInput.value);
-                if (isNaN(rssiValue)) { alert("유효한 RSSI 값을 입력하세요."); return; }
+                if (isNaN(rssiValue)) { 
+                    alert("유효한 RSSI 값을 입력하세요."); 
+                    return; 
+                }
                 
+                // 로그 엔트리 생성
                 const logEntry = {
                     timestamp: new Date().toISOString(),
                     rssi_input: rssiValue,
@@ -494,7 +635,9 @@
                     waypoint_y_before: algo.waypoint.y.toFixed(2),
                     stuck_counter: algo.stuck_counter,
                     estimated_velocity: kalmanFilter.getVelocity().toFixed(2),
-                    filter_initialized: kalmanFilter.initialized
+                    filter_initialized: kalmanFilter.initialized,
+                    phone_heading: phoneHeading.toFixed(1),
+                    target_bearing: targetBearing.toFixed(1)
                 };
                 
                 algo.decideAction(rssiValue);
@@ -528,7 +671,7 @@
                 const encodedUri = encodeURI(csvContent);
                 const link = document.createElement("a");
                 link.setAttribute("href", encodedUri);
-                link.setAttribute("download", "gps_test_kalman_log.csv");
+                link.setAttribute("download", "gps_test_final_working_log.csv");
                 document.body.appendChild(link);
                 link.click();
                 document.body.removeChild(link);
@@ -540,13 +683,19 @@
                 canvas.height = container.clientHeight;
             }
 
+            // 페이지 로드시 초기값 설정
+            setInitialValues();
+
             window.addEventListener('resize', setupCanvas);
             setupCanvas();
 
             if (navigator.geolocation) {
                 navigator.geolocation.watchPosition(
                     handleGpsSuccess, 
-                    (err) => { appStatus.textContent = `GPS 오류: ${err.message}` }, 
+                    (err) => { 
+                        appStatus.textContent = `GPS 오류: ${err.message}`;
+                        console.error('GPS Error:', err);
+                    }, 
                     { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
                 );
                 startButton.style.display = 'none';
