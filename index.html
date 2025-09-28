@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>GPS 도보 테스터 (정상작동 + 초기값 + 방향표시)</title>
+    <title>GPS 도보 테스터 (GPS 수신 수정완료)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/kalmanjs@1.1.0/dist/kalman.min.js"></script>
     <style>
@@ -51,7 +51,7 @@
 
     <div class="w-full max-w-lg mx-auto flex flex-col h-full">
         <header class="text-center py-2">
-            <h1 class="text-2xl font-bold text-cyan-400">GPS 도보 테스터 (정상작동 + 초기값 + 방향표시)</h1>
+            <h1 class="text-2xl font-bold text-cyan-400">GPS 도보 테스터 (GPS 수신 수정완료)</h1>
             <p id="app-status" class="text-gray-400 text-sm">GPS 신호를 기다리는 중...</p>
         </header>
 
@@ -108,7 +108,7 @@
     </div>
 
     <script>
-        // 칼만 필터 클래스 구현 (정상 작동하는 파일에서 가져옴)
+        // 칼만 필터 클래스 구현
         class KalmanFilter {
             constructor() {
                 // 상태 벡터: [x, y, vx, vy] (위치와 속도)
@@ -502,8 +502,9 @@
                 requestAnimationFrame(draw);
             }
 
-            // 정상 작동하는 파일의 GPS 처리 함수를 그대로 사용
+            // 핵심 수정: finder.html과 동일한 구조로 handleGpsSuccess 수정
             function handleGpsSuccess(position) {
+                // 원점 설정
                 if (!originLat) {
                     originLat = position.coords.latitude; 
                     originLon = position.coords.longitude;
@@ -514,33 +515,15 @@
                 
                 if (!algo) return;
                 
-                // 원시 GPS 좌표를 미터 단위로 변환
+                // 핵심: 매번 좌표 변환 + 칼만 필터 + 무조건 위치 업데이트!
                 const rawPosMeters = latlonToMeters(position.coords.latitude, position.coords.longitude);
-                
-                // 칼만 필터로 위치 추정
                 const filteredPos = kalmanFilter.update([rawPosMeters.x, rawPosMeters.y]);
                 const currentPosMeters = vec.create(filteredPos[0], filteredPos[1]);
                 
-                // 칼만 필터에서 추정된 속도 가져오기
-                const estimatedVelocity = kalmanFilter.getVelocity();
-                
-                // 필터 상태 업데이트
-                if (kalmanFilter.initialized) {
-                    filterStatus.textContent = "정상 작동";
-                } else {
-                    filterStatus.textContent = "초기화 중";
-                }
-                
-                // 속도 표시 업데이트
-                velocityDisplay.textContent = `${estimatedVelocity.toFixed(2)} m/s`;
-                
-                // 정지 상태 체크 (칼만 필터 추정 속도 기반) - 정상 작동 파일과 동일
-                if (estimatedVelocity < PARAMS.STATIONARY_SPEED_THRESHOLD) {
-                    // 정지 상태일 때는 위치 업데이트하지 않음
-                    return; 
-                }
-                
+                // 속도 조건 체크 없이 무조건 위치 업데이트 (finder.html 방식)
                 algo.updatePosition(currentPosMeters);
+                
+                // UI 상태 정보 즉시 업데이트
                 stateDisplay.textContent = algo.state; 
                 stuckDisplay.textContent = algo.stuck_counter;
                 currentMeterDisplay.textContent = `(${currentPosMeters.x.toFixed(1)}, ${currentPosMeters.y.toFixed(1)})m`;
@@ -549,9 +532,14 @@
                 totalDistanceDisplay.textContent = `${algo.getTotalDistance().toFixed(1)} m`;
                 bestSignalDisplay.textContent = `${algo.best_known_signal.toFixed(1)} dBm`;
                 
-                // 방향 업데이트 추가
+                // 칼만 필터 상태 업데이트
+                velocityDisplay.textContent = `${kalmanFilter.getVelocity().toFixed(2)} m/s`;
+                filterStatus.textContent = kalmanFilter.initialized ? "정상 작동" : "초기화 중";
+                
+                // 방향 업데이트
                 updateDirection();
                 
+                // 목표 도착 체크
                 if (dist < PARAMS.ARRIVAL_DISTANCE && !isWaitingForRssi) {
                     isWaitingForRssi = true; 
                     controlSection.style.display = 'block';
@@ -671,7 +659,7 @@
                 const encodedUri = encodeURI(csvContent);
                 const link = document.createElement("a");
                 link.setAttribute("href", encodedUri);
-                link.setAttribute("download", "gps_test_final_working_log.csv");
+                link.setAttribute("download", "gps_test_fixed_reception_log.csv");
                 document.body.appendChild(link);
                 link.click();
                 document.body.removeChild(link);
