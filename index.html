@@ -339,13 +339,13 @@
             const PARAMS = {
                 ARRIVAL_DISTANCE: 1.5,
                 ASCENT_THRESHOLD: -80.0,
-                TARGET_THRESHOLD: -35.0,
-                SIGNAL_PINPOINT: -45.0,   DIST_PINPOINT: 0.7,
-                SIGNAL_NEAR: -65.0,       DIST_NEAR: 2.0,
-                SIGNAL_MID: -75.0,        DIST_MID: 4.0,
-                DIST_FAR: 8.0,
-                STUCK_THRESHOLD: 4,
-                ESCAPE_DISTANCE: 7.0,
+                TARGET_THRESHOLD: -50.0,
+                SIGNAL_PINPOINT: -54.50,   DIST_PINPOINT: 1.25,
+                SIGNAL_NEAR: -59.8,       DIST_NEAR: 3.15,
+                SIGNAL_MID: -66.5,        DIST_MID: 6.20,
+                DIST_FAR: 18.35,
+                STUCK_THRESHOLD: 3,
+                ESCAPE_DISTANCE: 25.5,
                 RSSI_BUFFER_SIZE: 3,
                 RSSI_IMPROVEMENT_THRESHOLD: 1.0,
                 STATIONARY_SPEED_THRESHOLD: 0.5,
@@ -398,7 +398,7 @@
                 totalDistanceDisplay.textContent = "0.0 m";
                 stateDisplay.textContent = "IDLE";
                 stuckDisplay.textContent = "0";
-                bestSignalDisplay.textContent = "-100.0 dBm";
+                bestSignalDisplay.textContent = "-1000.0 dBm";
                 velocityDisplay.textContent = "0.00 m/s";
                 filterStatus.textContent = "초기화 중";
                 bearingDisplay.textContent = "0°";
@@ -694,3 +694,4 @@
     </script>
 </body>
 </html>
+
